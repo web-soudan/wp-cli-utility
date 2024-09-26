@@ -16,8 +16,9 @@ execute_wp_commands() {
     wp_commands=(
 		"echo SiteURL : $(wp option get home --path=$wp_dir)"
 		"echo Version : $(wp core version --path=$wp_dir)"
-		"wp core verify-checksums"
-		"wp plugin verify-checksums --all"
+#		"wp core verify-checksums"
+#		"wp plugin verify-checksums --all"
+        "find $wp_dir/wp-content/uploads/ -name \"*.php\""
     )
 
     # コマンドをまとめて1つのシェルコマンドにする
