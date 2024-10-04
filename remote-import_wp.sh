@@ -29,8 +29,7 @@ echo 'import Done'
 echo '----------------------------------------'
 
 echo 'wp rewrite flush'
-wp rewrite flush —hard
-wp cache flush
+wp rewrite flush --hard
 
 echo '----------------------------------------'
 
