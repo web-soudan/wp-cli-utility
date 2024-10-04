@@ -68,8 +68,13 @@ wp option update admin_email web@web-soudan.co.jp
 
 echo '----------------------------------------'
 
-echo 'change admin dashboard color'
-wp user meta update $(wp user list --format=json | jq '.[] | select(.user_login == "partner_webmaster") | .ID') admin_color blue
+echo 'get admin user list to JSON'
+echo 'loop processing change admin dashboard color'
+users=$(wp user list --role=administrator --format=json)
+
+for user_id in $(echo "$users" | jq '.[] | .ID'); do
+  wp user meta update "$user_id" admin_color blue
+done
 
 echo '----------------------------------------'
 
