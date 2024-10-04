@@ -28,10 +28,14 @@ wp ai1wm url restore --yes "$backup_wpress_url"
 echo 'import Done'
 echo '----------------------------------------'
 
+echo 'wp rewrite flush'
+wp rewrite flush —hard
+wp cache flush
+
 echo '----------------------------------------'
 
-echo 'wp rewrite flush'
-wp rewrite flush
+echo 'wp cache flush'
+wp cache flush
 
 echo '----------------------------------------'
 
