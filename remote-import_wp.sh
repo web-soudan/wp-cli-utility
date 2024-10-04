@@ -25,16 +25,23 @@ wp plugin install https://servmask.com/purchase/***REMOVED*** --activate
 echo 'Restore from remote wpress file'
 wp ai1wm url restore --yes "$backup_wpress_url"
 
-echo 'Done'
+echo 'import Done'
+echo '----------------------------------------'
+
+echo '----------------------------------------'
+
+echo 'wp rewrite flush'
+wp rewrite flush
+
 echo '----------------------------------------'
 
 echo SiteURL : $(wp option get home)
 echo Version : $(wp core version)
 
-echo '----------------------------------------'
+#echo '----------------------------------------'
 
-echo 'plugin verify-checksums'
-wp plugin verify-checksums --all
+#echo 'plugin verify-checksums'
+#wp plugin verify-checksums --all
 
 echo '----------------------------------------'
 
@@ -42,4 +49,20 @@ echo 'find php files(wp-content/uploads)'
 find ./wp-content/uploads/ -name "*.php"
 
 echo '----------------------------------------'
+
+echo 'update http -> https'
+wp search-replace `wp option get siteurl` `wp option get siteurl | sed s/http:/https:/`
+
+echo '----------------------------------------'
+
+echo 'update admin_email'
+wp option update admin_email web@web-soudan.co.jp
+
+echo '----------------------------------------'
+
+echo 'delete script'
+rm ./remote-import_wp.sh
+
+echo '----------------------------------------'
+
 echo 'Done'
