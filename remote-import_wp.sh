@@ -49,6 +49,11 @@ echo Version : $(wp core version)
 
 echo '----------------------------------------'
 
+echo 'linstall plugin : Query Monitor'
+wp plugin install query-monitor --activate
+
+echo '----------------------------------------'
+
 echo 'find php files(wp-content/uploads)'
 find ./wp-content/uploads/ -name "*.php"
 
