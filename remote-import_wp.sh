@@ -69,6 +69,11 @@ wp option update admin_email web@web-soudan.co.jp
 
 echo '----------------------------------------'
 
+echo 'change admin dashboard color'
+wp user meta update $(wp user list --format=json | jq '.[] | select(.user_login == "partner_webmaster") | .ID') admin_color blue
+
+echo '----------------------------------------'
+
 echo 'delete script'
 rm ./remote-import_wp.sh
 
