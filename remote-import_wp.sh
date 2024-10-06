@@ -53,6 +53,11 @@ wp plugin install query-monitor --activate
 
 echo '----------------------------------------'
 
+echo 'linstall plugin : Theme Check'
+wp plugin install theme-check --activate
+
+echo '----------------------------------------'
+
 echo 'find php files(wp-content/uploads)'
 find ./wp-content/uploads/ -name "*.php"
 
