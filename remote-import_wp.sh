@@ -19,8 +19,11 @@ wp plugin uninstall --all
 echo 'linstall plugin : All-in-One WP Migration'
 wp plugin install all-in-one-wp-migration --activate
 
-echo 'install plugin : All-in-One WP Migration URL Extension '
-wp plugin install https://servmask.com/purchase/***REMOVED*** --activate
+echo 'install plugin : All-in-One WP Migration Pro'
+wp plugin install https://servmask.com/purchase/***REMOVED***?siteurl=http://demo.local --activate
+
+echo 'initial setup ai1wm'
+wget -O temp_wp_options.sql ***REMOVED*** && sed "s/wp_/$(wp config get table_prefix)/g" temp_wp_options.sql | wp db query && rm temp_wp_options.sql
 
 echo 'Restore from remote wpress file'
 wp ai1wm url restore --yes "$backup_wpress_url"
