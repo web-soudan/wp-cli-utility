@@ -1,0 +1,23 @@
+# install plugin "All-in-One WP Migration"
+wp plugin install all-in-one-wp-migration --activate
+
+# install plugin "All-in-One WP Migration Pro"
+wp plugin install https://servmask.com/purchase/***REMOVED***?siteurl=http://demo.local --activate
+
+# initial setup ai1wm
+wget -O temp_wp_options.sql ***REMOVED*** && sed "s/wp_/$(wp config get table_prefix)/g" temp_wp_options.sql | wp db query && rm temp_wp_options.sql
+
+# install plugin "WP Force Login"
+wp plugin install wp-force-login --activate
+
+# install plugin "Query Monitor"
+wp plugin install wp-force-login query-monitor --activate
+
+# Language update
+$ wp language core update
+$ wp language plugin update --all
+$ wp language theme update --all
+
+# rewite&cache flush
+wp rewrite flush --hard
+wp cache flush --hard
