@@ -2,6 +2,8 @@
 #set -euxo pipefail
 set -euo pipefail
 
+## All plugin delete,import from remote wpress file
+
 # Set backup file URL
 read -p "Please set backup wpress file URL (Cancel: n/N): " backup_wpress_url
 
@@ -64,30 +66,12 @@ echo '----------------------------------------'
 echo 'find php files(wp-content/uploads)'
 find ./wp-content/uploads/ -name "*.php"
 
-echo '----------------------------------------'
-
-echo 'update http -> https'
-wp search-replace `wp option get siteurl` `wp option get siteurl | sed s/http:/https:/`
 
 echo '----------------------------------------'
 
 echo 'update admin_email'
 wp option update admin_email web@web-soudan.co.jp
-
-echo '----------------------------------------'
-
-echo 'get admin user list to JSON'
-echo 'loop processing change admin dashboard color'
-users=$(wp user list --role=administrator --format=json)
-
-for user_id in $(echo "$users" | jq '.[] | .ID'); do
-  wp user meta update "$user_id" admin_color blue
-done
-
-echo '----------------------------------------'
-
-echo 'delete script'
-rm ./remote-import_wp.sh
+wp option update new_admin_email web@web-soudan.co.jp
 
 echo '----------------------------------------'
 

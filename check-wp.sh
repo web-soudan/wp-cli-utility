@@ -1,12 +1,9 @@
-#!/usr/local/bin/bash -eu
-# for SAKURA internet
+#!/bin/bash
 
-# for XSERVER
-#!/bin/bash -eu
+set -e
 
 # 検索対象のディレクトリをセット
-search_dir="$HOME/www/"
-
+search_dir="./"
 
 # 実行するWPコマンドを関数化
 execute_wp_commands() {
@@ -16,10 +13,10 @@ execute_wp_commands() {
     wp_commands=(
 		"echo SiteURL : $(wp option get home --path=$wp_dir)"
 		"echo Version : $(wp core version --path=$wp_dir)"
-  		"echo admin_email : $(wp option get admin_email --path=$wp_dir)"
+		"echo admin_email : $(wp option get admin_email --path=$wp_dir)"
 #		"wp core verify-checksums"
 #		"wp plugin verify-checksums --all"
-        "find $wp_dir/wp-content/uploads/ -name \"*.php\""
+		"find $wp_dir/wp-content/uploads/ -name \"*.php\""
     )
 
     # コマンドをまとめて1つのシェルコマンドにする
@@ -38,6 +35,7 @@ execute_wp_commands() {
 	echo --------------------------------------------------
 	echo "Executing combined commands in $wp_dir"
 	eval "$combined_command"
+	wp plugin list --format=table --path=$wp_dir
 	echo --------------------------------------------------
 }
 
