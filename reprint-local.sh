@@ -12,7 +12,10 @@
 #   local-reprint --help
 #
 # Requires: /usr/local/bin/local-wp, curl
-#           <app/public>/reprint.phar（無ければ初回実行時に WordPress.org から自動ダウンロード）
+#           reprint.phar（無ければ初回実行時に WordPress.org から自動ダウンロード）
+#
+# 秘密鍵・state・reprint.phar は既定で app/reprint/ に置きます。
+# app/public は Web の公開フォルダで、Live Link で外部に公開すると中のファイルを誰でも取得できるためです。
 #
 set -Eeuo pipefail
 
@@ -40,15 +43,16 @@ Options:
   --target-host=HOST       既定: wp-config の DB_HOST（localhost ならソケット接続）
   --target-port=PORT       既定: DB_HOST に :port があればその値
   --new-site-url=URL       既定: wp option get home
-  --private-key-path=PATH  reprint の秘密鍵（相対パスは app/public 基準。
-                           既定: コピー元ごとに ./reprint-key-<ホスト名>.pem）。
+  --private-key-path=PATH  reprint の秘密鍵（既定: コピー元ごとに app/reprint/reprint-key-<ホスト名>.pem）。
                            無ければ reprint keygen で作成し、コピー元に登録する Migration Token と
                            登録先 URL を表示します（対話実行なら登録後に Enter でそのまま pull します）。
                            --secret=TOKEN（接続トークン）を渡した場合は秘密鍵を使いません
-  --phar=PATH              reprint.phar（既定: reprint.phar、app/public 基準）
+  --phar=PATH              reprint.phar（既定: app/reprint/reprint.phar）
                            無ければ pull の前に REPRINT_PHAR_URL からダウンロードします
-  --state-dir=DIR          既定: ./state
+  --state-dir=DIR          既定: app/reprint/state
   --fs-root=DIR            既定: ./files
+
+  相対パスは app/public 基準です。秘密鍵と state は app/public（Web の公開フォルダ）の外に置いてください。
   --no-link-wp-content     pull 後に app/public/wp-content を symlink にしない
                            （既定では、pull した wp-content への symlink にします。
                              既存の wp-content は wp-content.bak-<日時> にリネームして残します）
@@ -66,7 +70,7 @@ Environment:
 
 Examples:
   local-reprint mysite https://user:pass@example.com
-  local-reprint mysite https://user:pass@example.com --private-key-path=./reprint-key.pem
+  local-reprint mysite https://user:pass@example.com --phar=/path/to/reprint.phar
   local-reprint mysite https://example.com --target-db=reprint_copy --dry-run
 EOF
 }
@@ -80,6 +84,11 @@ mask_url() { printf '%s' "$1" | sed -E 's#^(https?://)[^/@]+@#\1***@#'; }
 
 # local-wp 経由で実行（.bashrc 等の stderr ノイズは捨てる）
 lw() { "$LOCAL_WP" "$SITE" -- "$@" 2>/dev/null; }
+
+# app/public 基準の相対パスを、ホスト上の絶対パスにする
+abs_from_public() {
+  if [[ "$1" == /* ]]; then printf '%s' "$1"; else printf '%s/%s' "$PUBLIC_DIR" "${1#./}"; fi
+}
 
 # JSON 1 行から "key":"value" の value を取り出す（\/ も戻す）
 json_str() { printf '%s' "$2" | sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g'; }
@@ -128,6 +137,42 @@ token_from_key() {
   openssl pkey -in "$1" -pubout -outform DER 2>/dev/null | base64 | tr -d '\n'
 }
 
+# 秘密鍵から Migration Token ID（公開鍵の DER の sha256 の先頭 16 桁。Reprint Server の一覧に出る ID）を求める
+key_id_from_key() {
+  command -v openssl >/dev/null 2>&1 || return 0
+  openssl pkey -in "$1" -pubout -outform DER 2>/dev/null | shasum -a 256 2>/dev/null | cut -c1-16
+}
+
+# reprint の API URL（reprint pull はサイト URL に ?reprint-api を自動で付けるが、preflight コマンドは付けない）
+reprint_api_url() {
+  case "$1" in
+    *[?\&]reprint-api*|*[?\&]site-export-api*) printf '%s' "$1" ;;
+    *\?*) printf '%s&reprint-api' "$1" ;;
+    *)    printf '%s?reprint-api' "$1" ;;
+  esac
+}
+
+# コピー元に秘密鍵が登録されているかを reprint preflight で確かめる。
+# 0: 通過 / 2: 未登録（AUTH_NOT_CONFIGURED・AUTH_UNKNOWN_KEY）/ 1: それ以外の失敗（原因は pull のエラー表示に任せる）
+# ※ --private-key-path を渡すと、未登録でも reprint pull は exit 4 ではなく exit 1 で終わるため、事前に確かめる。
+#   pull の state は使わず、確認用の一時フォルダを使って最後に消す。preflight の結果が pull の state に残ると、
+#   pull が自分の接続確認を飛ばしてその結果を使い回すため
+check_enrolled() {
+  local out code dir a rc=0
+  local opts=()
+  dir="${STATE_DIR%/}-enroll-check"
+  for a in ${PASSTHRU[@]+"${PASSTHRU[@]}"}; do [[ "$a" == --insecure ]] && opts+=(--insecure); done
+  out="$(lw php "$PHAR" preflight "$(reprint_api_url "$REMOTE")" --state-dir="$dir" --fs-root="$FS_ROOT" \
+         --private-key-path="$KEY_PATH" ${opts[@]+"${opts[@]}"})" || rc=$?
+  rm -rf "$(abs_from_public "$dir")"
+  [[ $rc -eq 0 ]] && return 0
+  code="$(printf '%s\n' "$out" | grep -o '"error_code":"[A-Z_]*"' | tail -n 1 | sed 's/.*:"//; s/"$//')" || code=""
+  case "$code" in
+    AUTH_NOT_CONFIGURED|AUTH_UNKNOWN_KEY) return 2 ;;
+  esac
+  return 1
+}
+
 # Migration Token と登録手順を表示し、macOS ならクリップボードにもコピーする
 show_enroll_guide() {
   local token="$1" key_id="${2:-}"
@@ -170,6 +215,7 @@ create_key() {
     err="$(json_str error "$out")"
     die "秘密鍵を作成できませんでした${err:+: ${err}}"
   fi
+  chmod 600 "$KEY_FILE" 2>/dev/null || warn "秘密鍵のパーミッションを 600 にできませんでした: $KEY_FILE"
   info "秘密鍵を作成しました"
   show_enroll_guide "$token" "$key_id"
 }
@@ -213,9 +259,13 @@ link_wp_content() {
 
 SITE="$1"; REMOTE="$2"; shift 2
 [[ "$REMOTE" =~ ^https?:// ]] || die "remote_url は http(s):// で始めてください: $REMOTE"
+# reprint は URL の文字列から state 内の記録の場所（remotes/<URL の md5>）を決めるため、
+# 末尾の / の有無だけで別のサイト扱いになり、前回の続きから同期できなくなる。表記をそろえるため取り除く
+while [[ "$REMOTE" == */ ]]; do REMOTE="${REMOTE%/}"; done
 
 OPT_DB=""; OPT_USER=""; OPT_PASS=""; OPT_PASS_SET=0; OPT_HOST=""; OPT_PORT=""; OPT_URL=""
-KEY_PATH=""; PHAR="reprint.phar"; STATE_DIR="./state"; FS_ROOT="./files"
+# PHAR・STATE_DIR・KEY_PATH の既定値は app/public の場所が分かってから決める（app/reprint/ 配下）
+KEY_PATH=""; PHAR=""; STATE_DIR=""; FS_ROOT="./files"
 DRY_RUN=0; ASSUME_YES=0; LINK_WP_CONTENT=1
 PASSTHRU=()
 
@@ -256,7 +306,7 @@ done
 info "local-wp ($SITE) から DB 情報とサイト URL を取得しています..."
 
 # 1 回の local-wp 呼び出しでまとめて取得する（1 行 1 値。取得できなかった値は __ERR__）
-# shellcheck disable=SC2016  # $k / $1 は local-wp 内の bash で展開させる
+# shellcheck disable=SC2016  # $k は local-wp 内の bash で展開させる
 RAW="$(lw bash -c '
   pwd
   for k in DB_NAME DB_USER DB_PASSWORD DB_HOST table_prefix; do
@@ -264,10 +314,9 @@ RAW="$(lw bash -c '
   done
   e="$(mktemp)"
   v="$(wp option get home --skip-plugins --skip-themes 2>"$e")" && printf "%s\n" "$v" || echo __ERR__
-  if [ -f "$1" ]; then echo yes; else echo no; fi
   grep -m1 "Error" "$e" | tr -d "\r"
   rm -f "$e"
-' _ "$PHAR")" || true
+')" || true
 
 {
   IFS= read -r PUBLIC_DIR   || true
@@ -277,7 +326,6 @@ RAW="$(lw bash -c '
   IFS= read -r CFG_HOST     || true
   IFS= read -r CFG_PREFIX   || true
   IFS= read -r CFG_HOME     || true
-  IFS= read -r PHAR_EXISTS  || true
   IFS= read -r HOME_ERR     || true   # home を取得できなかったときの wp のエラー（1 行）
 } <<< "$RAW"
 
@@ -291,18 +339,24 @@ done
 if [[ "${HOME_ERR:-}" == *データベース接続* || "${HOME_ERR:-}" == *"database connection"* ]]; then
   die "サイト「${SITE}」の DB に接続できません（${HOME_ERR}）。Local でサイトが起動しているか確認してください。"
 fi
-# reprint.phar のホスト上の絶対パス（無ければ確認後にダウンロードする）
-if [[ "$PHAR" == /* ]]; then PHAR_PATH="$PHAR"; else PHAR_PATH="$PUBLIC_DIR/${PHAR#./}"; fi
-PHAR_MISSING=0
-[[ "${PHAR_EXISTS:-no}" == "yes" ]] || PHAR_MISSING=1
+# 秘密鍵・state・reprint.phar の既定の置き場所。
+# app/public は Web の公開フォルダで、Live Link で外部公開すると秘密鍵を取得されるため、その一つ上の app/reprint に置く
+REPRINT_DIR="$(dirname "$PUBLIC_DIR")/reprint"
+[[ -n "$PHAR" ]]      || PHAR="$REPRINT_DIR/reprint.phar"
+[[ -n "$STATE_DIR" ]] || STATE_DIR="$REPRINT_DIR/state"
 
-# 秘密鍵（既定はコピー元ごとに app/public/reprint-key-<ホスト名>.pem）。無ければ確認後に作成する
+# reprint.phar のホスト上の絶対パス（無ければ確認後にダウンロードする）
+PHAR_PATH="$(abs_from_public "$PHAR")"
+PHAR_MISSING=0
+[[ -f "$PHAR_PATH" ]] || PHAR_MISSING=1
+
+# 秘密鍵（既定はコピー元ごとに app/reprint/reprint-key-<ホスト名>.pem）。無ければ確認後に作成する
 KEY_FILE=""; KEY_MISSING=0
 if [[ $USE_SECRET -eq 1 ]]; then
   KEY_LABEL="使わない（--secret の接続トークンで認証）"
 else
-  [[ -n "$KEY_PATH" ]] || KEY_PATH="./reprint-key-$(remote_host "$REMOTE").pem"
-  if [[ "$KEY_PATH" == /* ]]; then KEY_FILE="$KEY_PATH"; else KEY_FILE="$PUBLIC_DIR/${KEY_PATH#./}"; fi
+  [[ -n "$KEY_PATH" ]] || KEY_PATH="$REPRINT_DIR/reprint-key-$(remote_host "$REMOTE").pem"
+  KEY_FILE="$(abs_from_public "$KEY_PATH")"
   KEY_LABEL="$KEY_FILE"
   if [[ ! -f "$KEY_FILE" ]]; then
     KEY_MISSING=1
@@ -379,6 +433,29 @@ EOF
 show_cmd >&2
 echo >&2
 
+# 以前の既定（app/public 直下）に置いた秘密鍵・state・reprint.phar が残っていれば、移すよう案内する。
+# 公開フォルダに残ると Web から取得されるうえ、移さないと鍵の登録と pull を最初からやり直すことになるため
+OLD_PATHS=("$PUBLIC_DIR/state" "$PUBLIC_DIR/reprint.phar")
+NEW_PATHS=("$STATE_DIR" "$PHAR_PATH")
+if [[ -n "$KEY_FILE" ]]; then
+  OLD_PATHS+=("$PUBLIC_DIR/reprint-key-$(remote_host "$REMOTE").pem")
+  NEW_PATHS+=("$KEY_FILE")
+fi
+for i in "${!OLD_PATHS[@]}"; do
+  old="${OLD_PATHS[$i]}"; new="${NEW_PATHS[$i]}"
+  [[ -e "$old" && "$old" != "$new" ]] || continue
+  warn "以前の既定の場所（Web の公開フォルダ内）に残っています: $old"
+  if [[ ! -e "$new" ]]; then
+    warn "  引き継ぐなら、実行前に移してください: mkdir -p $(printf '%q' "$(dirname "$new")") && mv $(printf '%q' "$old") $(printf '%q' "$new")"
+  elif [[ "$old" == "$PUBLIC_DIR/state" ]] && ! ls "$new"/remotes/*/local_index.jsonl >/dev/null 2>&1; then
+    # 新しい state にはファイル取得の記録が無い（鍵の確認で止まった等）。古い state を消すと fs-root を最初から取り直すことになる
+    warn "  前回の pull の記録です。削除すると $FS_ROOT のファイルを最初から取り直すことになります。"
+    warn "  続きから同期するなら、新しい state と入れ替えてください: rm -rf $(printf '%q' "$new") && mv $(printf '%q' "$old") $(printf '%q' "$new")"
+  else
+    warn "  不要なら削除してください: rm -rf $(printf '%q' "$old")"
+  fi
+done
+
 if [[ $DRY_RUN -eq 1 ]]; then
   info "--dry-run のため実行しません"
   exit 0
@@ -391,13 +468,38 @@ if [[ $ASSUME_YES -ne 1 ]]; then
   [[ "$ans" =~ ^[Yy]([Ee][Ss])?$ ]] || { info "中止しました"; exit 1; }
 fi
 
+# app/reprint は自分だけが読めるようにする（秘密鍵と state を置くため）
+if [[ ! -d "$REPRINT_DIR" ]]; then
+  if ! { mkdir -p "$REPRINT_DIR" && chmod 700 "$REPRINT_DIR"; }; then
+    die "フォルダを作成できませんでした: $REPRINT_DIR"
+  fi
+fi
+
 # 初回実行時など reprint.phar が無ければ取得する
 [[ $PHAR_MISSING -eq 1 ]] && download_phar "$PHAR_PATH"
 
-# 秘密鍵が無ければ作成し、コピー元への登録を待つ
-if [[ $KEY_MISSING -eq 1 ]]; then
-  create_key
-  wait_for_enroll || exit 4
+# 秘密鍵が無ければ作成し、コピー元への登録を待つ。
+# 既存の鍵でも未登録（登録の取り消し・別の鍵への差し替えなど）なら、Migration Token を出し直して登録を待つ
+if [[ -n "$KEY_FILE" ]]; then
+  if [[ $KEY_MISSING -eq 1 ]]; then
+    create_key
+    wait_for_enroll || exit 4
+  fi
+  while :; do
+    info "コピー元に秘密鍵が登録されているか確認しています..."
+    enrolled=0; check_enrolled || enrolled=$?
+    [[ $enrolled -eq 2 ]] || break
+    warn "この秘密鍵はコピー元に登録されていません: $KEY_FILE"
+    token="$(token_from_key "$KEY_FILE")" || token=""
+    if [[ -z "$token" ]]; then
+      # reprint pull のエラーにも Migration Token が表示されるので、そちらで登録してもらう
+      warn "openssl が無いため Migration Token を表示できません。続く reprint のエラーに表示される Migration Token を登録してください。"
+      break
+    fi
+    key_id="$(key_id_from_key "$KEY_FILE")" || key_id=""
+    show_enroll_guide "$token" "$key_id"
+    wait_for_enroll || exit 4
+  done
 fi
 
 # wp-config と別の DB を使う場合は、無ければ作る（既存 DB には何もしない）
@@ -409,26 +511,19 @@ if [[ "$TARGET_DB" != "$CFG_DB" ]]; then
 fi
 
 # ---- pull 実行 ----------------------------------------------------------
-# exit 4 は「コピー元で鍵の登録が必要」。Token を出し直し、対話実行なら登録後に再試行する
-while :; do
-  set +e
-  "$LOCAL_WP" "$SITE" -- "${CMD[@]}"
-  status=$?
-  set -e
-  [[ $status -eq 4 ]] || break
-
-  token=""
-  [[ -n "$KEY_FILE" && -f "$KEY_FILE" ]] && { token="$(token_from_key "$KEY_FILE")" || token=""; }
-  if [[ -n "$token" ]]; then
-    warn "秘密鍵がコピー元に登録されていません。"
-    show_enroll_guide "$token"
-  else
-    warn "鍵の登録が必要です。上に表示された Migration Token をコピー元の「ツール → Reprint Server」に登録してください。"
-  fi
-  wait_for_enroll || exit 4
-done
+# 鍵の登録は上で確かめ済み（--private-key-path を渡すと reprint は鍵を自動作成せず、exit 4 も返さない）
+status=0
+"$LOCAL_WP" "$SITE" -- "${CMD[@]}" || status=$?
 
 if [[ $status -ne 0 ]]; then
+  # fs-root にファイルがあるのに state に取得の記録が無いと、再実行しても同じところで止まるため、対処を案内する
+  if grep -q 'Filesystem root is not empty and no cursor found' "$(abs_from_public "$STATE_DIR")/progress.json" 2>/dev/null; then
+    warn "reprint pull が失敗しました (exit $status)。"
+    warn "${FS_ROOT} に以前 pull したファイルがありますが、state（${STATE_DIR}）にこの URL での取得の記録がありません。"
+    warn "  前回の state が残っていれば ${STATE_DIR} に置き、前回と同じ URL で実行すると続きから同期できます。"
+    warn "  最初から取り直す場合は、削除してから再実行してください: rm -rf $(printf '%q' "$(abs_from_public "$FS_ROOT")")"
+    exit "$status"
+  fi
   warn "reprint pull が失敗しました (exit $status)。同じコマンドを再実行すると続きから再開します。"
   warn "Plugin 'mysql_native_password' is not loaded が出た場合、そのユーザー ($TARGET_USER) が MySQL に存在しない可能性があります。"
   exit "$status"

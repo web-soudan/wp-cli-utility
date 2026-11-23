@@ -262,6 +262,42 @@ token_from_key() {
   openssl pkey -in "$1" -pubout -outform DER 2>/dev/null | base64 | tr -d '\n'
 }
 
+# Migration Token から Migration Token ID（公開鍵の DER の sha256 の先頭 16 桁。Reprint Server の一覧に出る ID）を求める。
+# サーバーに shasum / sha256sum が無いこともあるため PHP で計算する
+key_id_from_token() {
+  printf '%s' "$1" | "$PHP_BIN" -r 'echo substr(hash("sha256", (string) base64_decode(trim(stream_get_contents(STDIN)), true)), 0, 16);' 2>/dev/null
+}
+
+# reprint の API URL（reprint pull はサイト URL に ?reprint-api を自動で付けるが、preflight コマンドは付けない）
+reprint_api_url() {
+  case "$1" in
+    *[?\&]reprint-api*|*[?\&]site-export-api*) printf '%s' "$1" ;;
+    *\?*) printf '%s&reprint-api' "$1" ;;
+    *)    printf '%s?reprint-api' "$1" ;;
+  esac
+}
+
+# コピー元に秘密鍵が登録されているかを reprint preflight で確かめる。
+# 0: 通過 / 2: 未登録（AUTH_NOT_CONFIGURED・AUTH_UNKNOWN_KEY）/ 1: それ以外の失敗（原因は pull のエラー表示に任せる）
+# ※ --private-key-path を渡すと、未登録でも reprint pull は exit 4 ではなく exit 1 で終わるため、事前に確かめる。
+#   pull の state は使わず、確認用の一時フォルダを使って最後に消す。preflight の結果が pull の state に残ると、
+#   pull が自分の接続確認を飛ばしてその結果を使い回すため
+check_enrolled() {
+  local out code dir a rc=0
+  local opts=()
+  dir="${STATE_DIR%/}-enroll-check"
+  for a in ${PASSTHRU[@]+"${PASSTHRU[@]}"}; do [[ "$a" == --insecure ]] && opts+=(--insecure); done
+  out="$("$PHP_BIN" "$PHAR_PATH" preflight "$(reprint_api_url "$REMOTE")" --state-dir="$dir" --fs-root="$FS_ROOT" \
+         --private-key-path="$KEY_FILE" ${opts[@]+"${opts[@]}"} 2>/dev/null)" || rc=$?
+  rm -rf "$dir"
+  [[ $rc -eq 0 ]] && return 0
+  code="$(printf '%s\n' "$out" | grep -o '"error_code":"[A-Z_]*"' | tail -n 1 | sed 's/.*:"//; s/"$//')" || code=""
+  case "$code" in
+    AUTH_NOT_CONFIGURED|AUTH_UNKNOWN_KEY) return 2 ;;
+  esac
+  return 1
+}
+
 # Migration Token と登録手順を表示する
 show_enroll_guide() {
   local token="$1" key_id="${2:-}"
@@ -394,6 +430,9 @@ link_wp_content() {
 
 REMOTE="$1"; shift
 [[ "$REMOTE" =~ ^https?:// ]] || die "remote_url は http(s):// で始めてください: $(mask_url "$REMOTE")"
+# reprint は URL の文字列から state 内の記録の場所（remotes/<URL の md5>）を決めるため、
+# 末尾の / の有無だけで別のサイト扱いになり、前回の続きから同期できなくなる。表記をそろえるため取り除く
+while [[ "$REMOTE" == */ ]]; do REMOTE="${REMOTE%/}"; done
 
 WP_PATH="."; OPT_WORK_DIR=""
 OPT_DB=""; OPT_USER=""; OPT_PASS=""; OPT_PASS_SET=0; OPT_HOST=""; OPT_PORT=""; OPT_URL=""
@@ -651,10 +690,28 @@ fi
 # 初回実行時など reprint.phar が無ければ取得する
 [[ $PHAR_MISSING -eq 1 ]] && download_phar "$PHAR_PATH"
 
-# 秘密鍵が無ければ作成し、コピー元への登録を待つ
-if [[ $KEY_MISSING -eq 1 ]]; then
-  create_key
-  wait_for_enroll || exit 4
+# 秘密鍵が無ければ作成し、コピー元への登録を待つ。
+# 既存の鍵でも未登録（登録の取り消し・別の鍵への差し替えなど）なら、Migration Token を出し直して登録を待つ
+if [[ -n "$KEY_FILE" ]]; then
+  if [[ $KEY_MISSING -eq 1 ]]; then
+    create_key
+    wait_for_enroll || exit 4
+  fi
+  while :; do
+    info "コピー元に秘密鍵が登録されているか確認しています..."
+    enrolled=0; check_enrolled || enrolled=$?
+    [[ $enrolled -eq 2 ]] || break
+    warn "この秘密鍵はコピー元に登録されていません: $KEY_FILE"
+    token="$(token_from_key "$KEY_FILE")" || token=""
+    if [[ -z "$token" ]]; then
+      # reprint pull のエラーにも Migration Token が表示されるので、そちらで登録してもらう
+      warn "openssl が無いため Migration Token を表示できません。続く reprint のエラーに表示される Migration Token を登録してください。"
+      break
+    fi
+    key_id="$(key_id_from_token "$token")" || key_id=""
+    show_enroll_guide "$token" "$key_id"
+    wait_for_enroll || exit 4
+  done
 fi
 
 # wp-config と別の DB を使う場合は、無ければ作る（既存 DB には何もしない）
@@ -667,26 +724,19 @@ if [[ "$TARGET_DB" != "$CFG_DB" ]]; then
 fi
 
 # ---- pull 実行 ----------------------------------------------------------
-# exit 4 は「コピー元で鍵の登録が必要」。Token を出し直し、対話実行なら登録後に再試行する
-while :; do
-  set +e
-  "${CMD[@]}"
-  status=$?
-  set -e
-  [[ $status -eq 4 ]] || break
-
-  token=""
-  [[ -n "$KEY_FILE" && -f "$KEY_FILE" ]] && { token="$(token_from_key "$KEY_FILE")" || token=""; }
-  if [[ -n "$token" ]]; then
-    warn "秘密鍵がコピー元に登録されていません。"
-    show_enroll_guide "$token"
-  else
-    warn "鍵の登録が必要です。上に表示された Migration Token をコピー元の「ツール → Reprint Server」に登録してください。"
-  fi
-  wait_for_enroll || exit 4
-done
+# 鍵の登録は上で確かめ済み（--private-key-path を渡すと reprint は鍵を自動作成せず、exit 4 も返さない）
+status=0
+"${CMD[@]}" || status=$?
 
 if [[ $status -ne 0 ]]; then
+  # fs-root にファイルがあるのに state に取得の記録が無いと、再実行しても同じところで止まるため、対処を案内する
+  if grep -q 'Filesystem root is not empty and no cursor found' "$STATE_DIR/progress.json" 2>/dev/null; then
+    warn "reprint pull が失敗しました (exit $status)。"
+    warn "${FS_ROOT} に以前 pull したファイルがありますが、state（${STATE_DIR}）にこの URL での取得の記録がありません。"
+    warn "  前回の state が残っていれば ${STATE_DIR} に置き、前回と同じ URL で実行すると続きから同期できます。"
+    warn "  最初から取り直す場合は、削除してから再実行してください: rm -rf $(printf '%q' "$(abs_path "$FS_ROOT")")"
+    exit "$status"
+  fi
   warn "reprint pull が失敗しました (exit $status)。同じコマンドを再実行すると続きから再開します。"
   warn "DB に接続できないエラーの場合は --target-user / --target-pass / --target-host を確認してください。"
   exit "$status"
