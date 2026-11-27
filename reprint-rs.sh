@@ -39,9 +39,15 @@ REPRINT_PHAR_URL="${REPRINT_PHAR_URL:-https://plugins.svn.wordpress.org/reprint/
 # reprint.phar を読み込んで実行する PHP（php -r 用。引数は <reprint.phar> <reprint の引数...>）。
 # 共用サーバーでは他のユーザーが ps でプロセスの引数を見られることがあるため、DB パスワード・Basic 認証付きの URL・
 # 接続トークンは引数に載せず、引数には @@RS_REMOTE@@ / @@RS_TARGET_PASS@@ / @@RS_SECRET@@ を置く。
-# 値は同名の環境変数で渡し（プロセスの環境変数は本人しか読めない）、ここで引数に戻してから環境変数を消す
+# 値は同名の環境変数で渡し（プロセスの環境変数は本人しか読めない）、ここで引数に戻してから環境変数を消す。
+# 古い libcurl（7.50.0 未満）で作られた PHP には CURLINFO_HTTP_VERSION が無く、reprint が通信の HTTP バージョンを
+# ログに書く箇所で「Undefined constant」になって止まるため、libcurl と同じ値（CURLINFO_LONG + 46）で補う。
+# 古い libcurl ではこの問い合わせに curl_getinfo が false を返し、reprint はバージョン不明として記録して処理を続ける
 # shellcheck disable=SC2016  # PHP のコードなので $ は展開しない
 REPRINT_LAUNCHER='
+if (extension_loaded("curl") && !defined("CURLINFO_HTTP_VERSION")) {
+  define("CURLINFO_HTTP_VERSION", 0x200000 + 46);
+}
 require (function () {
   $map = [];
   foreach (["RS_REMOTE", "RS_TARGET_PASS", "RS_SECRET"] as $k) {
